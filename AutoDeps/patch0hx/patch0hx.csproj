@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>patch0hx</AssemblyName>
+    <RootNamespace>patch0hx</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Reference Include="Mono.Cecil">
+      <HintPath>C:\Users\28050\WorkBuddy\2026-09-03-07-21-32\autodeps\cecil0114_ext\lib\net40\Mono.Cecil.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
