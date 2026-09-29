@@ -1,0 +1,6 @@
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\Release\UnityExplorer.Standalone.IL2CPP\UnityExplorer.STANDALONE.IL2CPP.dll
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\STANDALONE_Cpp\UnityExplorer.csproj.AssemblyReference.cache
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\STANDALONE_Cpp\UnityExplorer.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\STANDALONE_Cpp\UnityExplorer.csproj.CoreCompileInputs.cache
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\STANDALONE_Cpp\UnityExp.61A09673.Up2Date
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\STANDALONE_Cpp\UnityExplorer.STANDALONE.IL2CPP.dll

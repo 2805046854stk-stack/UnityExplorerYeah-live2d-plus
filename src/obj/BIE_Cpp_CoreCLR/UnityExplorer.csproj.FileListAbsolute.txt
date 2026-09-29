@@ -1,0 +1,9 @@
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\Release\UnityExplorer.BepInEx.IL2CPP.CoreCLR\UnityExplorer.BIE.IL2CPP.CoreCLR.deps.json
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\Release\UnityExplorer.BepInEx.IL2CPP.CoreCLR\UnityExplorer.BIE.IL2CPP.CoreCLR.dll
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\BIE_Cpp_CoreCLR\UnityExplorer.csproj.AssemblyReference.cache
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\BIE_Cpp_CoreCLR\UnityExplorer.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\BIE_Cpp_CoreCLR\UnityExplorer.csproj.CoreCompileInputs.cache
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\BIE_Cpp_CoreCLR\UnityExp.61A09673.Up2Date
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\BIE_Cpp_CoreCLR\UnityExplorer.BIE.IL2CPP.CoreCLR.dll
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\BIE_Cpp_CoreCLR\refint\UnityExplorer.BIE.IL2CPP.CoreCLR.dll
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\BIE_Cpp_CoreCLR\ref\UnityExplorer.BIE.IL2CPP.CoreCLR.dll

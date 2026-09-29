@@ -1,0 +1,79 @@
+{
+  "format": 1,
+  "restore": {
+    "C:\\Users\\28050\\Desktop\\毕设文件夹\\dggbd\\UnityExplorer-4.9\\src\\UnityExplorer.csproj": {}
+  },
+  "projects": {
+    "C:\\Users\\28050\\Desktop\\毕设文件夹\\dggbd\\UnityExplorer-4.9\\src\\UnityExplorer.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\Users\\28050\\Desktop\\毕设文件夹\\dggbd\\UnityExplorer-4.9\\src\\UnityExplorer.csproj",
+        "projectName": "UnityExplorer.BIE5.Mono",
+        "projectPath": "C:\\Users\\28050\\Desktop\\毕设文件夹\\dggbd\\UnityExplorer-4.9\\src\\UnityExplorer.csproj",
+        "packagesPath": "C:\\Users\\28050\\.nuget\\packages",
+        "outputPath": "C:\\Users\\28050\\Desktop\\毕设文件夹\\dggbd\\UnityExplorer-4.9\\src\\obj\\",
+        "projectStyle": "PackageReference",
+        "fallbackFolders": [
+          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages",
+          "C:\\Program Files (x86)\\Microsoft\\Xamarin\\NuGet\\"
+        ],
+        "configFilePaths": [
+          "C:\\Users\\28050\\Desktop\\毕设文件夹\\dggbd\\UnityExplorer-4.9\\src\\NuGet.Config",
+          "C:\\Users\\28050\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Xamarin.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net35"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "C:\\Program Files\\dotnet\\library-packs": {},
+          "https://api.nuget.org/v3/index.json": {},
+          "https://nuget.bepinex.dev/v3/index.json": {}
+        },
+        "frameworks": {
+          "net35": {
+            "targetAlias": "net35",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.100"
+      },
+      "frameworks": {
+        "net35": {
+          "targetAlias": "net35",
+          "dependencies": {
+            "HarmonyX": {
+              "include": "Compile",
+              "target": "Package",
+              "version": "[2.16.0, )"
+            },
+            "Microsoft.NETFramework.ReferenceAssemblies": {
+              "suppressParent": "All",
+              "target": "Package",
+              "version": "[1.0.3, )",
+              "autoReferenced": true
+            },
+            "Samboy063.Tomlet": {
+              "target": "Package",
+              "version": "[6.2.0, )"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.101\\RuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

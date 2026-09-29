@@ -1,0 +1,6 @@
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\Release\UnityExplorer.MelonLoader.IL2CPP\UnityExplorer.ML.IL2CPP.dll
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\ML_Cpp_net472\UnityExplorer.csproj.AssemblyReference.cache
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\ML_Cpp_net472\UnityExplorer.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\ML_Cpp_net472\UnityExplorer.csproj.CoreCompileInputs.cache
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\ML_Cpp_net472\UnityExp.61A09673.Up2Date
+C:\Users\28050\Desktop\毕设文件夹\dggbd\UnityExplorer-4.9\src\obj\ML_Cpp_net472\UnityExplorer.ML.IL2CPP.dll
