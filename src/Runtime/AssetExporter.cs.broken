@@ -1,0 +1,1899 @@
+﻿using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
+using System.Text;
+using UnityExplorer.Config;
+using UnityEngine;
+
+namespace UnityExplorer.Runtime
+{
+    /// <summary>
+    /// 资源导出工具：从 GameObject 提取并导出纹理、模型、音频、材质、Live2D等资�?    /// 支持递归子对象�?D/3D检测、Live2D资源提取、隐�?显示循环加载
+    /// </summary>
+    public static class AssetExporter
+    {
+        /// <summary>
+        /// 可导出资源项
+        /// </summary>
+        public class ExportableItem
+        {
+            public string Name;
+            public string Type;
+            public UnityEngine.Object Asset;
+            public System.Action<string> ExportAction;
+        }
+
+        /// <summary>
+        /// 游戏维度类型
+        /// </summary>
+        public enum GameDimension
+        {
+            Unknown,
+            Game2D,
+            Game3D,
+            Mixed
+        }
+
+        // 已导出资源的名称去重
+        private static readonly HashSet<string> exportedNames = new();
+        private const int MaxRecursionDepth = 20;
+        private const int MaxObjectsToScan = 500;
+        private static int scannedObjectCount = 0;
+
+        /// <summary>
+        /// �?GameObject 及其所有子对象收集所有可导出的资源（递归�?        /// </summary>
+        public static List<ExportableItem> CollectExportables(GameObject go)
+        {
+            exportedNames.Clear();
+            scannedObjectCount = 0;
+            List<ExportableItem> items = new();
+
+            if (!go)
+                return items;
+
+            CollectFromObjectRecursive(go, items, "", 0);
+
+            return items;
+        }
+
+        /// <summary>
+        /// 只收集当前对象的资源（不递归子对象）
+        /// </summary>
+        public static List<ExportableItem> CollectSingleObject(GameObject go)
+        {
+            exportedNames.Clear();
+            List<ExportableItem> items = new();
+            if (!go)
+                return items;
+
+            CollectFromSingleObject(go, items, go.name);
+
+            return items;
+        }
+
+        /// <summary>
+        /// 递归收集对象及子对象资源，并匹配 Live2D Cubism 组件（协程循环用�?        /// </summary>
+        public static List<ExportableItem> CollectLive2DExportables(GameObject root)
+        {
+            exportedNames.Clear();
+            List<ExportableItem> items = new();
+            if (root == null)
+                return items;
+
+            // 1. 对象子树扫描（Mesh/Texture/Cubism反射/TextAsset�?            CollectLive2DRecursive(root, items, "", 0);
+
+            // 2. 从对象向上找模型根（含CubismModel/CubismMoc的祖先），再扫描其子�?            try
+            {
+                GameObject modelRoot = FindCubismModelRoot(root);
+                if (modelRoot != null && modelRoot != root)
+                    CollectLive2DRecursive(modelRoot, items, "模型�?" + modelRoot.name, 0);
+            }
+            catch { }
+
+            // 3. 全局扫描兜底：所有 TextAsset（moc3/json）
+            CollectGlobalTextAssets(items);
+
+            // 4. 全局扫描兜底：所有 Texture2D（贴图）
+            CollectGlobalTextures(items);
+
+            return items;
+        }
+
+        /// <summary>
+        /// 从对象向上查找包�?Cubism 组件的模型根节点
+        /// </summary>
+        private static GameObject FindCubismModelRoot(GameObject go)
+        {
+            Transform t = go != null ? go.transform : null;
+            int guard = 0;
+            while (t != null && guard++ < 20)
+            {
+                try
+                {
+                    Component[] comps = t.gameObject.GetComponents<Component>();
+                    if (comps != null)
+                    {
+                        foreach (Component c in comps)
+                        {
+                            if (c == null) continue;
+                            string tn = GetComponentTypeName(c);
+                            if (tn.Contains("CubismModel") || tn.Contains("CubismMoc") || tn.Contains("CubismRenderController"))
+                                return t.gameObject;
+                        }
+                    }
+                }
+                catch { }
+                t = t.parent;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 全局扫描所�?TextAsset，提�?Live2D 相关数据（moc3/json�?        /// </summary>
+        private static void CollectGlobalTextAssets(List<ExportableItem> items)
+        {
+            try
+            {
+                UnityEngine.Object[] all = null;
+#if CPP
+                try
+                {
+                    // 通过 Il2CppSystem.Type.GetType 获取类型
+                    Il2CppSystem.Type il2cppType = Il2CppSystem.Type.GetType("UnityEngine.TextAsset, UnityEngine.CoreModule");
+                    if (il2cppType != null)
+                        all = UnityEngine.Object.FindObjectsOfTypeAll(il2cppType);
+                }
+                catch
+                {
+                    all = null;
+                }
+#else
+                all = UnityEngine.Object.FindObjectsOfTypeAll(typeof(TextAsset));
+#endif
+                if (all != null)
+                {
+                    int mocCount = 0, jsonCount = 0, otherCount = 0, nullCount = 0;
+                    foreach (UnityEngine.Object o in all)
+                    {
+                        try
+                        {
+                            TextAsset ta = o.TryCast<TextAsset>();
+                            if (ta == null)
+                            {
+                                nullCount++;
+                                continue;
+                            }
+                            string ext = DetectTextAssetExtension(ta);
+                            if (ext == "moc3" || ext == "moc")
+                            {
+                                mocCount++;
+                                string name = string.IsNullOrEmpty(ta.name) ? "live2d_data" : ta.name;
+                                if (!exportedNames.Contains(name + "_" + ext))
+                                {
+                                    exportedNames.Add(name + "_" + ext);
+                                    items.Add(new ExportableItem
+                                    {
+                                        Name = name,
+                                        Type = $"Live2D Model (.{ext})",
+                                        Asset = ta,
+                                        ExportAction = (path) => ExportTextAsset(ta, path, ext)
+                                    });
+                                }
+                            }
+                            else if (ext == "json" || ext == "csv")
+                            {
+                                jsonCount++;
+                                string name = string.IsNullOrEmpty(ta.name) ? "live2d_data" : ta.name;
+                                if (!exportedNames.Contains(name + "_" + ext))
+                                {
+                                    exportedNames.Add(name + "_" + ext);
+                                    items.Add(new ExportableItem
+                                    {
+                                        Name = name,
+                                        Type = $"Live2D Data (.{ext})",
+                                        Asset = ta,
+                                        ExportAction = (path) => ExportTextAsset(ta, path, ext)
+                                    });
+                                }
+                            }
+                            else
+                            {
+                                otherCount++;
+                            }
+                        }
+                        catch { }
+                    }
+                    ExplorerCore.Log($"[全局扫描] TextAsset �?{all.Length} �? moc {mocCount}, json/csv {jsonCount}, 其他 {otherCount}, 转换失败 {nullCount}");
+                }
+                else
+                {
+                    ExplorerCore.Log("[全局扫描] TextAsset 扫描返回空");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"[全局扫描] TextAsset 失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 全局扫描所�?Texture2D（Live2D 贴图兜底�?        /// </summary>
+        private static void CollectGlobalTextures(List<ExportableItem> items)
+        {
+            try
+            {
+                UnityEngine.Object[] all = null;
+#if CPP
+                try
+                {
+                    Il2CppSystem.Type il2cppType = Il2CppSystem.Type.GetType("UnityEngine.Texture2D, UnityEngine.CoreModule");
+                    if (il2cppType != null)
+                        all = UnityEngine.Object.FindObjectsOfTypeAll(il2cppType);
+                }
+                catch
+                {
+                    all = null;
+                }
+#else
+                all = UnityEngine.Object.FindObjectsOfTypeAll(typeof(Texture2D));
+#endif
+                if (all != null)
+                {
+                    int added = 0, smallCount = 0, nullCount = 0, dupCount = 0;
+                    foreach (UnityEngine.Object o in all)
+                    {
+                        try
+                        {
+                            Texture2D tex = o.TryCast<Texture2D>();
+                            if (tex == null)
+                            {
+                                nullCount++;
+                                continue;
+                            }
+                            if (tex.width <= 4 || tex.height <= 4)
+                            {
+                                smallCount++;
+                                continue;
+                            }
+                            string name = string.IsNullOrEmpty(tex.name) ? "texture_" + tex.GetInstanceID() : tex.name;
+                            if (!exportedNames.Contains(name + "_png"))
+                            {
+                                exportedNames.Add(name + "_png");
+                                items.Add(new ExportableItem
+                                {
+                                    Name = name,
+                                    Type = "Texture (.png)",
+                                    Asset = tex,
+                                    ExportAction = (path) => ExportTextureAsPNG(tex, path)
+                                });
+                                added++;
+                            }
+                            else
+                            {
+                                dupCount++;
+                            }
+                        }
+                        catch { }
+                    }
+                    ExplorerCore.Log($"[全局扫描] Texture2D �?{all.Length} �? 新增 {added}, 小图 {smallCount}, 重复 {dupCount}, 转换失败 {nullCount}");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"[全局扫描] Texture2D 失败: {ex.Message}");
+            }
+        }
+
+        private static void CollectLive2DRecursive(GameObject go, List<ExportableItem> items, string pathPrefix, int depth)
+        {
+            if (go == null || depth > 15)
+                return;
+
+            string objPath = string.IsNullOrEmpty(pathPrefix) ? go.name : $"{pathPrefix}/{go.name}";
+
+            // 收集普通资源（Mesh/Texture/Audio�?            try { CollectFromSingleObject(go, items, objPath); } catch { }
+
+            // 收集 Live2D Cubism 组件资源
+            try
+            {
+                Component[] comps = go.GetComponents<Component>();
+                if (comps != null)
+                {
+                    foreach (Component comp in comps)
+                    {
+                        try
+                        {
+                            if (comp == null) continue;
+                            string tn = GetComponentTypeName(comp);
+                            if (tn.Contains("Cubism") || tn.Contains("Live2D") || tn.Contains("L2D"))
+                                CollectCubismComponent(comp, items, objPath);
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            // 收集对象上的 TextAsset（Live2D motion json 等）
+            try
+            {
+                TextAsset[] textAssets = go.GetComponents<TextAsset>();
+                if (textAssets != null)
+                {
+                    foreach (TextAsset ta in textAssets)
+                    {
+                        try
+                        {
+                            if (ta == null) continue;
+                            string ext = DetectTextAssetExtension(ta);
+                            string taName = string.IsNullOrEmpty(ta.name) ? $"{objPath}_Data" : ta.name;
+                            if (!exportedNames.Contains(taName + "_" + ext))
+                            {
+                                exportedNames.Add(taName + "_" + ext);
+                                items.Add(new ExportableItem
+                                {
+                                    Name = taName,
+                                    Type = $"Live2D Data (.{ext})",
+                                    Asset = ta,
+                                    ExportAction = (path) => ExportTextAsset(ta, path, ext)
+                                });
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            // 递归子对�?            for (int i = 0; i < go.transform.childCount; i++)
+            {
+                try
+                {
+                    Transform child = go.transform.GetChild(i);
+                    if (child != null)
+                        CollectLive2DRecursive(child.gameObject, items, objPath, depth + 1);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// 通过反射提取 Cubism 组件中的资源（moc3、纹理、动画）
+        /// </summary>
+        private static void CollectCubismComponent(Component comp, List<ExportableItem> items, string objPath)
+        {
+            System.Type t = comp.GetType();
+            string tn = GetComponentTypeName(comp);
+
+            // CubismMoc -> MocSource (TextAsset) = moc3 文件
+            if (tn.Contains("CubismMoc"))
+            {
+                try
+                {
+                    object val = GetFieldOrProp(comp, "MocSource");
+                    if (val == null)
+                        val = GetFieldOrProp(comp, "_mocSource");
+                    if (val == null)
+                        val = GetFieldOrProp(comp, "Moc");
+                    if (val is TextAsset mocTA && mocTA != null)
+                    {
+                        string mocName = string.IsNullOrEmpty(mocTA.name) ? $"{objPath}_model" : mocTA.name;
+                        if (!exportedNames.Contains(mocName + "_moc3"))
+                        {
+                            exportedNames.Add(mocName + "_moc3");
+                            items.Add(new ExportableItem
+                            {
+                                Name = mocName,
+                                Type = "Live2D Model (.moc3)",
+                                Asset = mocTA,
+                                ExportAction = (path) => ExportTextAsset(mocTA, path, "moc3")
+                            });
+                        }
+                    }
+                    // 尝试 byte[] 字段（moc3 原始字节�?                    else if (val is byte[] mocBytes && mocBytes != null && mocBytes.Length > 0)
+                    {
+                        string mocName = $"{objPath}_model";
+                        byte[] captured = mocBytes;
+                        if (!exportedNames.Contains(mocName + "_moc3"))
+                        {
+                            exportedNames.Add(mocName + "_moc3");
+                            items.Add(new ExportableItem
+                            {
+                                Name = mocName,
+                                Type = "Live2D Model (.moc3)",
+                                Asset = null,
+                                ExportAction = (path) => ExportBytes(captured, path, "moc3")
+                            });
+                        }
+                    }
+                    else
+                    {
+                        // 尝试其他字节字段
+                        object bval = GetFieldOrProp(comp, "_mocData");
+                        if (bval == null)
+                            bval = GetFieldOrProp(comp, "MocData");
+                        if (bval is byte[] mocBytes2 && mocBytes2 != null && mocBytes2.Length > 0)
+                        {
+                            string mocName = $"{objPath}_model";
+                            byte[] captured = mocBytes2;
+                            if (!exportedNames.Contains(mocName + "_moc3"))
+                            {
+                                exportedNames.Add(mocName + "_moc3");
+                                items.Add(new ExportableItem
+                                {
+                                    Name = mocName,
+                                    Type = "Live2D Model (.moc3)",
+                                    Asset = null,
+                                    ExportAction = (path) => ExportBytes(captured, path, "moc3")
+                                });
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // CubismModel -> Textures (Texture2D[])
+            if (tn.Contains("CubismModel"))
+            {
+                try
+                {
+                    object val = GetFieldOrProp(comp, "Textures");
+                    if (val == null)
+                        val = GetFieldOrProp(comp, "_textures");
+                    if (val is System.Collections.IEnumerable texList)
+                    {
+                        int idx = 0;
+                        foreach (object o in texList)
+                        {
+                            try
+                            {
+                                Texture2D tex = o as Texture2D;
+                                if (tex != null)
+                                {
+                                    string texName = string.IsNullOrEmpty(tex.name) ? $"{objPath}_tex{idx}" : tex.name;
+                                    AddExportItem(items, texName, "Live2D Texture (.png)", tex,
+                                        (path) => ExportTextureAsPNG(tex, path));
+                                    idx++;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // CubismRenderer -> MainTexture
+            if (tn.Contains("CubismRenderer"))
+            {
+                try
+                {
+                    object val = GetFieldOrProp(comp, "MainTexture");
+                    if (val == null)
+                        val = GetFieldOrProp(comp, "mainTexture");
+                    if (val == null)
+                        val = GetFieldOrProp(comp, "_mainTexture");
+                    if (val is Texture2D tex && tex != null)
+                    {
+                        string texName = string.IsNullOrEmpty(tex.name) ? $"{objPath}_rendererTex" : tex.name;
+                        AddExportItem(items, texName, "Live2D Texture (.png)", tex,
+                            (path) => ExportTextureAsPNG(tex, path));
+                    }
+                }
+                catch { }
+            }
+
+            // CubismDrawable -> 通过 Renderer 获取材质纹理
+            if (tn.Contains("CubismDrawable"))
+            {
+                try
+                {
+                    Renderer r = comp.TryCast<Renderer>();
+                    if (r != null && r.sharedMaterial != null && r.sharedMaterial.HasProperty("_MainTex"))
+                    {
+                        Texture tex = r.sharedMaterial.GetTexture("_MainTex");
+                        if (tex is Texture2D tex2d && tex2d != null)
+                        {
+                            string texName = string.IsNullOrEmpty(tex2d.name) ? $"{objPath}_drawableTex" : tex2d.name;
+                            AddExportItem(items, texName, "Live2D Texture (.png)", tex2d,
+                                (path) => ExportTextureAsPNG(tex2d, path));
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // 动画控制�?-> Motion 列表（AnimationClip �?TextAsset�?            if (tn.Contains("Motion") || tn.Contains("Animation"))
+            {
+                try
+                {
+                    object val = GetFieldOrProp(comp, "MotionList");
+                    if (val == null)
+                        val = GetFieldOrProp(comp, "Animations");
+                    if (val == null)
+                        val = GetFieldOrProp(comp, "motions");
+                    if (val is System.Collections.IEnumerable motionList)
+                    {
+                        int idx = 0;
+                        foreach (object o in motionList)
+                        {
+                            try
+                            {
+                                if (o == null) { idx++; continue; }
+                                if (o is TextAsset mta && mta != null)
+                                {
+                                    string ext = DetectTextAssetExtension(mta);
+                                    string mName = string.IsNullOrEmpty(mta.name) ? $"{objPath}_motion{idx}" : mta.name;
+                                    AddExportItem(items, mName, $"Live2D Motion (.{ext})", mta,
+                                        (path) => ExportTextAsset(mta, path, ext));
+                                }
+                                else if (o != null && o.GetType().Name == "AnimationClip")
+                                {
+                                    // AnimationClip 导出信息
+                                    string mName = $"{objPath}_motion{idx}";
+                                    object captured = o;
+                                    items.Add(new ExportableItem
+                                    {
+                                        Name = mName,
+                                        Type = "Animation (.json)",
+                                        Asset = null,
+                                        ExportAction = (path) => ExportAnimationInfo(captured, path)
+                                    });
+                                }
+                                idx++;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// 获取组件的真实类型名（IL2CPP Interop 下必须用 GetIl2CppType 才能拿到真实类型名）
+        /// </summary>
+        public static string GetComponentTypeName(Component comp)
+        {
+            if (comp == null)
+                return "";
+
+            try
+            {
+#if INTEROP
+                // Il2CppInterop: GetType() 对游戏程序集类型可能返回基类"Component"
+                var il2cppType = comp.GetIl2CppType();
+                if (il2cppType != null)
+                {
+                    string fn = il2cppType.FullName ?? il2cppType.Name ?? "";
+                    if (!string.IsNullOrEmpty(fn))
+                        return fn;
+                }
+                return comp.GetType().Name;
+#else
+                return comp.GetType().Name;
+#endif
+            }
+            catch
+            {
+                try { return comp.GetType().Name; }
+                catch { return ""; }
+            }
+        }
+
+        /// <summary>
+        /// 通过反射安全读取字段或属性（优先 Il2Cpp 反射，兜�?System 反射�?        /// </summary>
+        private static object GetFieldOrProp(Component comp, string name)
+        {
+#if INTEROP
+            try
+            {
+                var il2cppType = comp.GetIl2CppType();
+                if (il2cppType != null)
+                {
+                    var flags = Il2CppSystem.Reflection.BindingFlags.Instance
+                        | Il2CppSystem.Reflection.BindingFlags.Public
+                        | Il2CppSystem.Reflection.BindingFlags.NonPublic;
+                    try
+                    {
+                        var f = il2cppType.GetField(name, flags);
+                        if (f != null)
+                        {
+                            var v = f.GetValue(comp);
+                            if (v != null)
+                                return v;
+                        }
+                    }
+                    catch { }
+                    try
+                    {
+                        var p = il2cppType.GetProperty(name, flags);
+                        if (p != null)
+                        {
+                            var v = p.GetValue(comp, null);
+                            if (v != null)
+                                return v;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+#endif
+            return GetFieldOrProp(comp.GetType(), comp, name);
+        }
+
+        /// <summary>
+        /// 通过反射安全读取字段或属性（System.Type 版本�?        /// </summary>
+        private static object GetFieldOrProp(System.Type t, object obj, string name)
+        {
+            try
+            {
+                FieldInfo f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f != null)
+                    return f.GetValue(obj);
+            }
+            catch { }
+            try
+            {
+                PropertyInfo p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (p != null)
+                    return p.GetValue(obj, null);
+            }
+            catch { }
+            // 尝试基类
+            try
+            {
+                System.Type baseType = t.BaseType;
+                if (baseType != null && baseType != typeof(object))
+                {
+                    FieldInfo f = baseType.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (f != null)
+                        return f.GetValue(obj);
+                    PropertyInfo p = baseType.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (p != null)
+                        return p.GetValue(obj, null);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// 递归收集对象及其子对象的资源（带深度和数量限制）
+        /// </summary>
+        private static void CollectFromObjectRecursive(GameObject go, List<ExportableItem> items, string pathPrefix, int depth)
+        {
+            if (!go)
+                return;
+
+            if (depth > MaxRecursionDepth)
+                return;
+
+            scannedObjectCount++;
+            if (scannedObjectCount > MaxObjectsToScan)
+                return;
+
+            string objPath = string.IsNullOrEmpty(pathPrefix) ? go.name : $"{pathPrefix}/{go.name}";
+
+            // 收集当前对象的资源（每个部分内部已有 try-catch�?            try
+            {
+                CollectFromSingleObject(go, items, objPath);
+            }
+            catch { }
+
+            // 递归子对象（每个子对象独�?try-catch�?            for (int i = 0; i < go.transform.childCount; i++)
+            {
+                try
+                {
+                    Transform child = go.transform.GetChild(i);
+                    if (child)
+                        CollectFromObjectRecursive(child.gameObject, items, objPath, depth + 1);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// 从单个对象收集资源（安全版：单次GetComponents，类型名判断�?        /// </summary>
+        private static void CollectFromSingleObject(GameObject go, List<ExportableItem> items, string objPath)
+        {
+            if (go == null)
+                return;
+
+            Component[] components = null;
+            try
+            {
+                components = go.GetComponents<Component>();
+            }
+            catch
+            {
+                return;
+            }
+
+            if (components == null)
+                return;
+
+            foreach (Component comp in components)
+            {
+                try
+                {
+                    if (comp == null)
+                        continue;
+
+                    // 必须用真实类型名（IL2CPP �?GetType().Name 返回"Component"�?                    string typeName = GetComponentTypeName(comp);
+
+                    // MeshFilter
+                    if (typeName == "MeshFilter" || typeName.Contains("MeshFilter"))
+                    {
+                        try
+                        {
+                            MeshFilter mf = comp.TryCast<MeshFilter>();
+                            if (mf != null && mf.sharedMesh != null)
+                            {
+                                Mesh mesh = mf.sharedMesh;
+                                items.Add(new ExportableItem
+                                {
+                                    Name = $"{objPath}_Mesh",
+                                    Type = "Mesh (.obj)",
+                                    Asset = mesh,
+                                    ExportAction = (path) => ExportMeshAsOBJ(mesh, path)
+                                });
+                            }
+                        }
+                        catch { }
+                    }
+                    // SkinnedMeshRenderer
+                    else if (typeName.Contains("SkinnedMeshRenderer"))
+                    {
+                        try
+                        {
+                            SkinnedMeshRenderer smr = comp.TryCast<SkinnedMeshRenderer>();
+                            if (smr != null && smr.sharedMesh != null)
+                            {
+                                Mesh mesh = smr.sharedMesh;
+                                items.Add(new ExportableItem
+                                {
+                                    Name = $"{objPath}_SkinnedMesh",
+                                    Type = "Mesh (.obj)",
+                                    Asset = mesh,
+                                    ExportAction = (path) => ExportMeshAsOBJ(mesh, path)
+                                });
+                            }
+                        }
+                        catch { }
+                    }
+                    // SpriteRenderer
+                    else if (typeName.Contains("SpriteRenderer"))
+                    {
+                        try
+                        {
+                            SpriteRenderer sr = comp.TryCast<SpriteRenderer>();
+                            if (sr != null && sr.sprite != null && sr.sprite.texture != null)
+                            {
+                                Texture2D tex = sr.sprite.texture;
+                                items.Add(new ExportableItem
+                                {
+                                    Name = $"{objPath}_Sprite",
+                                    Type = "Texture (.png)",
+                                    Asset = tex,
+                                    ExportAction = (path) => ExportTextureAsPNG(tex, path)
+                                });
+                            }
+                        }
+                        catch { }
+                    }
+                    // MeshRenderer / Renderer
+                    else if (typeName.Contains("MeshRenderer") || typeName.Contains("Renderer"))
+                    {
+                        try
+                        {
+                            Renderer renderer = comp.TryCast<Renderer>();
+                            if (renderer != null)
+                            {
+                                Material[] mats = renderer.sharedMaterials;
+                                if (mats != null)
+                                {
+                                    for (int i = 0; i < mats.Length; i++)
+                                    {
+                                        try
+                                        {
+                                            Material mat = mats[i];
+                                            if (mat == null || mat.shader == null)
+                                                continue;
+
+                                            if (mat.HasProperty("_MainTex"))
+                                            {
+                                                Texture tex = mat.GetTexture("_MainTex");
+                                                if (tex != null && tex is Texture2D tex2d)
+                                                {
+                                                    string texName = string.IsNullOrEmpty(tex2d.name) ? $"{objPath}_Mat{i}_MainTex" : tex2d.name;
+                                                    items.Add(new ExportableItem
+                                                    {
+                                                        Name = texName,
+                                                        Type = "Texture (.png)",
+                                                        Asset = tex2d,
+                                                        ExportAction = (path) => ExportTextureAsPNG(tex2d, path)
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                    // AudioSource
+                    else if (typeName.Contains("AudioSource"))
+                    {
+                        try
+                        {
+                            AudioSource audio = comp.TryCast<AudioSource>();
+                            if (audio != null && audio.clip != null)
+                            {
+                                AudioClip clip = audio.clip;
+                                string clipName = string.IsNullOrEmpty(clip.name) ? $"{objPath}_Audio" : clip.name;
+                                items.Add(new ExportableItem
+                                {
+                                    Name = clipName,
+                                    Type = "Audio (.wav)",
+                                    Asset = clip,
+                                    ExportAction = (path) => ExportAudioAsWAV(clip, path)
+                                });
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// 添加导出项（去重�?        /// </summary>
+        private static void AddExportItem(List<ExportableItem> items, string name, string type,
+            UnityEngine.Object asset, System.Action<string> exportAction)
+        {
+            if (asset == null)
+                return;
+
+            string key = name + "_" + type;
+            if (exportedNames.Contains(key))
+                return;
+            exportedNames.Add(key);
+
+            items.Add(new ExportableItem
+            {
+                Name = name,
+                Type = type,
+                Asset = asset,
+                ExportAction = exportAction
+            });
+        }
+
+        /// <summary>
+        /// 检测游戏是2D还是3D
+        /// </summary>
+        public static GameDimension DetectGameDimension()
+        {
+            // 只检查相机，不扫描场景（避免 IL2CPP 崩溃�?            try
+            {
+                Camera[] cameras = Camera.allCameras;
+                if (cameras != null)
+                {
+                    bool has2D = false, has3D = false;
+                    foreach (Camera cam in cameras)
+                    {
+                        if (cam == null) continue;
+                        if (cam.orthographic) has2D = true;
+                        else has3D = true;
+                    }
+                    if (has2D && has3D) return GameDimension.Mixed;
+                    if (has2D) return GameDimension.Game2D;
+                    if (has3D) return GameDimension.Game3D;
+                }
+            }
+            catch { }
+            return GameDimension.Unknown;
+        }
+
+        /// <summary>
+        /// 检测对象是否为 Live2D 模型
+        /// </summary>
+        public static bool IsLive2DObject(GameObject go)
+        {
+            if (go == null)
+                return false;
+
+            try
+            {
+                // 只检查当前对象的组件名，不递归（避�?IL2CPP 崩溃�?                Component[] components = go.GetComponents<Component>();
+                if (components != null)
+                {
+                    foreach (Component comp in components)
+                    {
+                        try
+                        {
+                            if (comp == null) continue;
+                            string typeName = comp.GetType().Name;
+                            if (typeName.Contains("Cubism") || typeName.Contains("Live2D") || typeName.Contains("L2D"))
+                                return true;
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool IsLive2DObjectRecursive(GameObject go, int depth)
+        {
+            // 保留接口但不递归，避免崩�?            return IsLive2DObject(go);
+        }
+
+        /// <summary>
+        /// 收集 Live2D 相关资源（moc3、纹理、动画等�?        /// </summary>
+        private static void CollectLive2DResources(GameObject go, List<ExportableItem> items, string objPath)
+        {
+            Component[] components = go.GetComponents<Component>();
+
+            foreach (Component comp in components)
+            {
+                if (comp == null)
+                    continue;
+
+                System.Type compType = comp.GetType();
+                string typeName = compType.Name;
+
+                // CubismModel - 包含 moc3 数据和纹�?                if (typeName == "CubismModel" || typeName.Contains("CubismModel"))
+                {
+                    ExtractCubismModelResources(comp, items, objPath);
+                }
+
+                // CubismRenderer - 包含纹理
+                if (typeName == "CubismRenderer" || typeName.Contains("CubismRenderer"))
+                {
+                    ExtractCubismRendererResources(comp, items, objPath);
+                }
+
+                // CubismMotionController / 动画控制�?                if (typeName.Contains("Motion") || typeName.Contains("Animation"))
+                {
+                    ExtractMotionResources(comp, items, objPath);
+                }
+            }
+
+            // 递归检查子对象中的 Live2D 组件
+            for (int i = 0; i < go.transform.childCount; i++)
+            {
+                Transform child = go.transform.GetChild(i);
+                if (child != null)
+                {
+                    Component[] childComps = child.gameObject.GetComponents<Component>();
+                    foreach (Component comp in childComps)
+                    {
+                        if (comp == null)
+                            continue;
+                        string tn = comp.GetType().Name;
+                        if (tn == "CubismModel" || tn.Contains("CubismModel"))
+                            ExtractCubismModelResources(comp, items, $"{objPath}/{child.name}");
+                        if (tn == "CubismRenderer" || tn.Contains("CubismRenderer"))
+                            ExtractCubismRendererResources(comp, items, $"{objPath}/{child.name}");
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// �?CubismModel 提取 moc3 和纹�?        /// </summary>
+        private static void ExtractCubismModelResources(Component comp, List<ExportableItem> items, string objPath)
+        {
+            System.Type type = comp.GetType();
+
+            // 尝试获取 Moc 字段/属性（可能�?TextAsset �?byte[]�?            FieldInfo mocField = type.GetField("Moc", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            PropertyInfo mocProp = type.GetProperty("Moc", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+            object mocValue = mocField?.GetValue(comp) ?? mocProp?.GetValue(comp, null);
+            if (mocValue != null)
+            {
+                if (mocValue is TextAsset mocTA)
+                {
+                    string mocName = string.IsNullOrEmpty(mocTA.name) ? $"{objPath}_model" : mocTA.name;
+                    AddExportItem(items, mocName, "Live2D Model (.moc3)", mocTA,
+                        (path) => ExportTextAsset(mocTA, path, "moc3"));
+                }
+                else if (mocValue is byte[] mocBytes)
+                {
+                    string mocName = $"{objPath}_model";
+                    // byte[] 不能直接作为 Asset，用闭包捕获
+                    byte[] capturedBytes = mocBytes;
+                    items.Add(new ExportableItem
+                    {
+                        Name = mocName,
+                        Type = "Live2D Model (.moc3)",
+                        Asset = null,
+                        ExportAction = (path) => ExportBytes(capturedBytes, path, "moc3")
+                    });
+                }
+            }
+
+            // 尝试获取 Textures 字段/属�?            FieldInfo texField = type.GetField("Textures", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            PropertyInfo texProp = type.GetProperty("Textures", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+            object texValue = texField?.GetValue(comp) ?? texProp?.GetValue(comp, null);
+            if (texValue is Texture2D[] textures)
+            {
+                for (int i = 0; i < textures.Length; i++)
+                {
+                    Texture2D tex = textures[i];
+                    if (tex == null)
+                        continue;
+                    string texName = string.IsNullOrEmpty(tex.name) ? $"{objPath}_tex{i}" : tex.name;
+                    AddExportItem(items, texName, "Live2D Texture (.png)", tex,
+                        (path) => ExportTextureAsPNG(tex, path));
+                }
+            }
+        }
+
+        /// <summary>
+        /// �?CubismRenderer 提取纹理
+        /// </summary>
+        private static void ExtractCubismRendererResources(Component comp, List<ExportableItem> items, string objPath)
+        {
+            System.Type type = comp.GetType();
+
+            // MainTexture / Texture
+            string[] texPropNames = { "MainTexture", "Texture", "mainTexture" };
+            foreach (string propName in texPropNames)
+            {
+                PropertyInfo prop = type.GetProperty(propName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                FieldInfo field = type.GetField(propName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                object val = prop?.GetValue(comp, null) ?? field?.GetValue(comp);
+                if (val is Texture2D tex && tex != null)
+                {
+                    string texName = string.IsNullOrEmpty(tex.name) ? $"{objPath}_rendererTex" : tex.name;
+                    AddExportItem(items, texName, "Live2D Texture (.png)", tex,
+                        (path) => ExportTextureAsPNG(tex, path));
+                    break;
+                }
+            }
+
+            // Material
+            FieldInfo matField = type.GetField("Material", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            PropertyInfo matProp = type.GetProperty("Material", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            object matVal = matField?.GetValue(comp) ?? matProp?.GetValue(comp, null);
+            if (matVal is Material mat && mat != null)
+            {
+                string matName = string.IsNullOrEmpty(mat.name) ? $"{objPath}_rendererMat" : mat.name;
+                AddExportItem(items, matName, "Material (.txt)", mat,
+                    (path) => ExportMaterialInfo(mat, path));
+
+                // 从材质中提取纹理
+                if (mat.HasProperty("_MainTex"))
+                {
+                    Texture tex = mat.GetTexture("_MainTex");
+                    if (tex is Texture2D tex2d && tex2d != null)
+                    {
+                        string texName = string.IsNullOrEmpty(tex2d.name) ? $"{objPath}_mainTex" : tex2d.name;
+                        AddExportItem(items, texName, "Live2D Texture (.png)", tex2d,
+                            (path) => ExportTextureAsPNG(tex2d, path));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 从动画控制器提取动画资源
+        /// </summary>
+        private static void ExtractMotionResources(Component comp, List<ExportableItem> items, string objPath)
+        {
+            System.Type type = comp.GetType();
+
+            // 尝试获取 MotionList / Animations / Clips
+            string[] listNames = { "MotionList", "Animations", "Clips", "motions", "Motions" };
+            foreach (string listName in listNames)
+            {
+                FieldInfo field = type.GetField(listName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                PropertyInfo prop = type.GetProperty(listName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                object val = field?.GetValue(comp) ?? prop?.GetValue(comp, null);
+
+                if (val is System.Collections.IEnumerable enumerable)
+                {
+                    int idx = 0;
+                    foreach (object item in enumerable)
+                    {
+                        if (item == null)
+                        {
+                            idx++;
+                            continue;
+                        }
+
+                        // 检查是否为 AnimationClip（用类型名判断，兼容不同版本�?                        string itemTypeName = item.GetType().Name;
+                        if (itemTypeName == "AnimationClip")
+                        {
+                            string clipName = item.GetType().GetProperty("name")?.GetValue(item, null)?.ToString() ?? $"{objPath}_motion{idx}";
+#if !CPP
+                            if (item is AnimationClip clip)
+                            {
+                                AddExportItem(items, clipName, "Animation (.json)", clip,
+                                    (path) => ExportAnimationAsJSON(clip, path));
+                            }
+                            else
+#endif
+                            {
+                                // IL2CPP 或无 AnimationClip 时，导出基本信息�?JSON
+                                object capturedItem = item;
+                                items.Add(new ExportableItem
+                                {
+                                    Name = clipName,
+                                    Type = "Animation (.json)",
+                                    Asset = null,
+                                    ExportAction = (path) => ExportAnimationInfo(capturedItem, path)
+                                });
+                            }
+                        }
+                        else if (item is TextAsset ta && ta != null)
+                        {
+                            string ext = DetectTextAssetExtension(ta);
+                            string taName = string.IsNullOrEmpty(ta.name) ? $"{objPath}_motion{idx}" : ta.name;
+                            AddExportItem(items, taName, $"Live2D Motion (.{ext})", ta,
+                                (path) => ExportTextAsset(ta, path, ext));
+                        }
+                        idx++;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 通过隐藏/显示循环触发资源加载，然后导出（安全版本：只操作Renderer，不碰根对象�?        /// </summary>
+        public static List<ExportableItem> CollectWithReloadCycle(GameObject root, int cycles = 3)
+        {
+            if (root == null)
+                return new List<ExportableItem>();
+
+            List<ExportableItem> allItems = new();
+            HashSet<string> allNames = new();
+
+            // 先收集一次当前可用资�?            List<ExportableItem> initialItems = CollectExportables(root);
+            foreach (ExportableItem item in initialItems)
+            {
+                string key = item.Name + "_" + item.Type;
+                if (!allNames.Contains(key))
+                {
+                    allNames.Add(key);
+                    allItems.Add(item);
+                }
+            }
+
+            // 收集所有可安全操作�?Renderer
+            List<Renderer> renderers = new();
+            try
+            {
+                Renderer[] allRenderers = root.GetComponentsInChildren<Renderer>(true);
+                foreach (Renderer r in allRenderers)
+                {
+                    try
+                    {
+                        if (r == null) continue;
+                        if (r is CanvasRenderer) continue;
+                        renderers.Add(r);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            // 循环：只切换 Renderer �?enabled
+            for (int cycle = 0; cycle < cycles; cycle++)
+            {
+                try
+                {
+                    foreach (Renderer r in renderers)
+                    {
+                        try { if (r != null) r.enabled = false; } catch { }
+                    }
+                    foreach (Renderer r in renderers)
+                    {
+                        try { if (r != null) r.enabled = true; } catch { }
+                    }
+                }
+                catch { break; }
+
+                try
+                {
+                    List<ExportableItem> cycleItems = CollectExportables(root);
+                    int newCount = 0;
+                    foreach (ExportableItem item in cycleItems)
+                    {
+                        string key = item.Name + "_" + item.Type;
+                        if (!allNames.Contains(key))
+                        {
+                            allNames.Add(key);
+                            allItems.Add(item);
+                            newCount++;
+                        }
+                    }
+                    if (newCount == 0 && cycle > 0)
+                        break;
+                }
+                catch { break; }
+            }
+
+            return allItems;
+        }
+
+        /// <summary>
+        /// 检�?TextAsset 的扩展名
+        /// </summary>
+        private static string DetectTextAssetExtension(TextAsset ta)
+        {
+            if (ta == null)
+                return "txt";
+
+            // 方法1：读字节检测文件头
+            try
+            {
+                byte[] bytes = ta.bytes;
+                if (bytes != null && bytes.Length >= 4)
+                {
+                    // moc3: 0x4D 0x4F 0x43 0x33 = "MOC3"
+                    if (bytes[0] == 0x4D && bytes[1] == 0x4F && bytes[2] == 0x43 && bytes[3] == 0x33)
+                        return "moc3";
+                    // moc: 0x6D 0x6F 0x63 = "moc"（小写）+ 版本字节（如0x0B�?                    if (bytes[0] == 0x6D && bytes[1] == 0x6F && bytes[2] == 0x63)
+                        return "moc";
+                    // json: {"
+                    if (bytes[0] == 0x7B && bytes[1] == 0x22)
+                        return "json";
+                    // zip: PK
+                    if (bytes[0] == 0x50 && bytes[1] == 0x4B)
+                        return "zip";
+                    // txt 文本
+                    if (bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+                        return "txt";
+                }
+            }
+            catch { }
+
+            // 方法2：按名称判断（bytes 可能不可读）
+            string name = ta.name?.ToLower() ?? "";
+            if (name.Contains(".moc3") || name.Contains("moc3"))
+                return "moc3";
+            if (name.Contains(".moc") || name.Contains("moc_") || name.Contains("_moc"))
+                return "moc";
+            if (name.EndsWith(".json") || name.Contains(".json"))
+                return "json";
+            if (name.EndsWith(".csv") || name.Contains(".csv"))
+                return "csv";
+            if (name.EndsWith(".txt"))
+                return "txt";
+            if (name.EndsWith(".xml") || name.Contains(".xml"))
+                return "xml";
+
+            return "txt";
+        }
+
+        /// <summary>
+        /// 导出 TextAsset
+        /// </summary>
+        public static void ExportTextAsset(TextAsset ta, string path, string extension)
+        {
+            if (ta == null)
+            {
+                ExplorerCore.LogWarning("TextAsset 为空�?);
+                return;
+            }
+
+            if (!path.EndsWith("." + extension, System.StringComparison.OrdinalIgnoreCase))
+                path += "." + extension;
+
+            path = EnsureValidPath(path);
+
+            try
+            {
+                byte[] bytes = ta.bytes;
+                if (bytes != null && bytes.Length > 0)
+                {
+                    File.WriteAllBytes(path, bytes);
+                }
+                else
+                {
+                    File.WriteAllText(path, ta.text);
+                }
+                ExplorerCore.Log($"数据文件已导�? {path}");
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"导出数据文件失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 导出字节数组
+        /// </summary>
+        public static void ExportBytes(byte[] bytes, string path, string extension)
+        {
+            if (bytes == null || bytes.Length == 0)
+            {
+                ExplorerCore.LogWarning("字节数据为空�?);
+                return;
+            }
+
+            if (!path.EndsWith("." + extension, System.StringComparison.OrdinalIgnoreCase))
+                path += "." + extension;
+
+            path = EnsureValidPath(path);
+
+            try
+            {
+                File.WriteAllBytes(path, bytes);
+                ExplorerCore.Log($"字节数据已导�? {path}");
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"导出字节数据失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 导出纹理�?PNG（安全版本，处理不可�?压缩纹理�?        /// </summary>
+        public static void ExportTextureAsPNG(Texture2D texture, string path)
+        {
+            if (texture == null)
+            {
+                ExplorerCore.LogWarning("纹理为空，无法导出！");
+                return;
+            }
+
+            if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                path += ".png";
+
+            path = EnsureValidPath(path);
+
+            try
+            {
+                byte[] pngBytes = GetTexturePNGBytesSafe(texture);
+                if (pngBytes != null && pngBytes.Length > 0)
+                {
+                    File.WriteAllBytes(path, pngBytes);
+                    ExplorerCore.Log($"纹理已导�? {path}");
+                }
+                else
+                {
+                    ExplorerCore.LogWarning($"纹理导出失败（无法读取像素）: {texture.name}");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"导出纹理失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 安全获取纹理 PNG 字节（处理不可读、压缩、特殊格式纹理）
+        /// </summary>
+        private static byte[] GetTexturePNGBytesSafe(Texture2D texture)
+        {
+            if (texture == null)
+                return null;
+
+            int width = texture.width;
+            int height = texture.height;
+
+            if (width <= 0 || height <= 0)
+                return null;
+
+            // 限制最大尺寸防止内存爆�?            const int MaxDim = 4096;
+            if (width > MaxDim || height > MaxDim)
+            {
+                float scale = (float)MaxDim / Mathf.Max(width, height);
+                width = Mathf.Max(1, (int)(width * scale));
+                height = Mathf.Max(1, (int)(height * scale));
+            }
+
+            // 方法1：如果纹理可读，直接�?GetPixels32
+            try
+            {
+                if (texture.isReadable)
+                {
+                    Color32[] pixels = texture.GetPixels32();
+                    if (pixels != null && pixels.Length > 0)
+                    {
+                        Texture2D exportTex = new Texture2D(texture.width, texture.height, TextureFormat.RGBA32, false);
+                        exportTex.SetPixels32(pixels);
+                        exportTex.Apply();
+                        byte[] bytes = EncodeTextureToPNG(exportTex);
+                        UnityEngine.Object.Destroy(exportTex);
+                        return bytes;
+                    }
+                }
+            }
+            catch { }
+
+            // 方法2：用 RenderTexture 中转（处理不可读/压缩纹理�?            try
+            {
+                RenderTexture rt = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+                Graphics.Blit(texture, rt);
+
+                RenderTexture prev = RenderTexture.active;
+                RenderTexture.active = rt;
+
+                Texture2D exportTex = new Texture2D(width, height, TextureFormat.RGBA32, false);
+                exportTex.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                exportTex.Apply();
+
+                byte[] bytes = EncodeTextureToPNG(exportTex);
+
+                RenderTexture.active = prev;
+                RenderTexture.ReleaseTemporary(rt);
+                UnityEngine.Object.Destroy(exportTex);
+
+                return bytes;
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"RenderTexture 中转导出失败: {ex.Message}");
+            }
+
+            // 方法3：最后尝试直接编�?            try
+            {
+                return EncodeTextureToPNG(texture);
+            }
+            catch { }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 纹理编码�?PNG（兼容不同运行时�?        /// </summary>
+        private static byte[] EncodeTextureToPNG(Texture2D tex)
+        {
+#if INTEROP
+            // BIE6 Interop 版用 UniverseLib 的方�?            try
+            {
+                string tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ue_export_" + System.Guid.NewGuid().ToString("N") + ".png");
+                UniverseLib.Runtime.TextureHelper.SaveTextureAsPNG(tex, tempPath);
+                byte[] bytes = File.ReadAllBytes(tempPath);
+                File.Delete(tempPath);
+                return bytes;
+            }
+            catch
+            {
+                return null;
+            }
+#else
+            return tex.EncodeToPNG();
+#endif
+        }
+
+        /// <summary>
+        /// 导出 Mesh �?OBJ 格式
+        /// </summary>
+        public static void ExportMeshAsOBJ(Mesh mesh, string path)
+        {
+            if (!mesh)
+            {
+                ExplorerCore.LogWarning("网格为空，无法导出！");
+                return;
+            }
+
+            if (!path.EndsWith(".obj", StringComparison.OrdinalIgnoreCase))
+                path += ".obj";
+
+            path = EnsureValidPath(path);
+
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine($"# UnityExplorer OBJ Export: {mesh.name}");
+                sb.AppendLine($"# Vertices: {mesh.vertexCount}");
+                sb.AppendLine();
+
+                // 顶点
+                Vector3[] vertices = mesh.vertices;
+                foreach (Vector3 v in vertices)
+                    sb.AppendLine($"v {v.x:F6} {v.y:F6} {v.z:F6}");
+
+                // UV
+                Vector2[] uvs = mesh.uv;
+                if (uvs != null && uvs.Length > 0)
+                {
+                    foreach (Vector2 uv in uvs)
+                        sb.AppendLine($"vt {uv.x:F6} {uv.y:F6}");
+                }
+
+                // 法线
+                Vector3[] normals = mesh.normals;
+                if (normals != null && normals.Length > 0)
+                {
+                    foreach (Vector3 n in normals)
+                        sb.AppendLine($"vn {n.x:F6} {n.y:F6} {n.z:F6}");
+                }
+
+                // �?                int[] triangles = mesh.triangles;
+                bool hasUV = uvs != null && uvs.Length > 0;
+                bool hasNormal = normals != null && normals.Length > 0;
+
+                for (int i = 0; i < triangles.Length; i += 3)
+                {
+                    int i0 = triangles[i] + 1;
+                    int i1 = triangles[i + 1] + 1;
+                    int i2 = triangles[i + 2] + 1;
+
+                    if (hasUV && hasNormal)
+                        sb.AppendLine($"f {i0}/{i0}/{i0} {i1}/{i1}/{i1} {i2}/{i2}/{i2}");
+                    else if (hasUV)
+                        sb.AppendLine($"f {i0}/{i0} {i1}/{i1} {i2}/{i2}");
+                    else if (hasNormal)
+                        sb.AppendLine($"f {i0}//{i0} {i1}//{i1} {i2}//{i2}");
+                    else
+                        sb.AppendLine($"f {i0} {i1} {i2}");
+                }
+
+                File.WriteAllText(path, sb.ToString());
+                ExplorerCore.Log($"网格已导�? {path}");
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"导出网格失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 导出音频�?WAV
+        /// </summary>
+        public static void ExportAudioAsWAV(AudioClip clip, string path)
+        {
+            if (!clip)
+            {
+                ExplorerCore.LogWarning("音频为空，无法导出！");
+                return;
+            }
+
+            if (!path.EndsWith(".wav", System.StringComparison.OrdinalIgnoreCase))
+                path += ".wav";
+
+            path = EnsureValidPath(path);
+
+            try
+            {
+                float[] samples = new float[clip.samples * clip.channels];
+                clip.GetData(samples, 0);
+
+                // 转换�?16-bit PCM
+                short[] intData = new short[samples.Length];
+                byte[] bytesData = new byte[samples.Length * 2];
+                for (int i = 0; i < samples.Length; i++)
+                {
+                    intData[i] = (short)(samples[i] * 32767f);
+                    byte[] byteArr = System.BitConverter.GetBytes(intData[i]);
+                    byteArr.CopyTo(bytesData, i * 2);
+                }
+
+                using (System.IO.FileStream fs = new System.IO.FileStream(path, System.IO.FileMode.Create))
+                {
+                    // WAV header
+                    byte[] riff = System.Text.Encoding.UTF8.GetBytes("RIFF");
+                    fs.Write(riff, 0, 4);
+                    byte[] chunkSize = System.BitConverter.GetBytes(36 + bytesData.Length);
+                    fs.Write(chunkSize, 0, 4);
+                    byte[] wave = System.Text.Encoding.UTF8.GetBytes("WAVE");
+                    fs.Write(wave, 0, 4);
+                    byte[] fmt = System.Text.Encoding.UTF8.GetBytes("fmt ");
+                    fs.Write(fmt, 0, 4);
+                    byte[] subChunk1 = System.BitConverter.GetBytes(16);
+                    fs.Write(subChunk1, 0, 4);
+                    byte[] audioFormat = System.BitConverter.GetBytes((ushort)1);
+                    fs.Write(audioFormat, 0, 2);
+                    byte[] numChannels = System.BitConverter.GetBytes((ushort)clip.channels);
+                    fs.Write(numChannels, 0, 2);
+                    byte[] sampleRate = System.BitConverter.GetBytes(clip.frequency);
+                    fs.Write(sampleRate, 0, 4);
+                    byte[] byteRate = System.BitConverter.GetBytes(clip.frequency * clip.channels * 2);
+                    fs.Write(byteRate, 0, 4);
+                    byte[] blockAlign = System.BitConverter.GetBytes((ushort)(clip.channels * 2));
+                    fs.Write(blockAlign, 0, 2);
+                    byte[] bitsPerSample = System.BitConverter.GetBytes((ushort)16);
+                    fs.Write(bitsPerSample, 0, 2);
+                    byte[] data = System.Text.Encoding.UTF8.GetBytes("data");
+                    fs.Write(data, 0, 4);
+                    byte[] subChunk2 = System.BitConverter.GetBytes(bytesData.Length);
+                    fs.Write(subChunk2, 0, 4);
+                    // PCM data
+                    fs.Write(bytesData, 0, bytesData.Length);
+                }
+
+                ExplorerCore.Log($"音频已导�? {path}");
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"导出音频失败（可能是压缩或流式音频）: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 导出材质信息为文�?        /// </summary>
+        public static void ExportMaterialInfo(Material mat, string path)
+        {
+            if (!mat)
+            {
+                ExplorerCore.LogWarning("材质为空，无法导出！");
+                return;
+            }
+
+            if (!path.EndsWith(".txt", System.StringComparison.OrdinalIgnoreCase))
+                path += ".txt";
+
+            path = EnsureValidPath(path);
+
+            try
+            {
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                sb.AppendLine("=== Material Info ===");
+                sb.AppendLine($"Name: {mat.name}");
+                sb.AppendLine($"Shader: {mat.shader.name}");
+                sb.AppendLine($"RenderQueue: {mat.renderQueue}");
+                sb.AppendLine();
+
+                // 常见颜色属�?                string[] colorProps = new string[]
+                {
+                    "_Color", "_BaseColor", "_EmissionColor", "_SpecColor",
+                    "_TintColor", "_BorderColor", "_RimColor", "_MainColor"
+                };
+                sb.AppendLine("--- Colors ---");
+                foreach (string prop in colorProps)
+                {
+                    if (mat.HasProperty(prop))
+                    {
+                        Color c = mat.GetColor(prop);
+                        sb.AppendLine($"[Color] {prop} = ({c.r:F4}, {c.g:F4}, {c.b:F4}, {c.a:F4})");
+                    }
+                }
+
+                // 常见浮点属�?                string[] floatProps = new string[]
+                {
+                    "_Glossiness", "_Metallic", "_BumpScale", "_Parallax",
+                    "_OcclusionStrength", "_EmissionScale", "_Cutoff", "_AlphaCutoff",
+                    "_DetailNormalMapScale", "_UVSec", "_Mode", "_ZWrite", "_SrcBlend", "_DstBlend"
+                };
+                sb.AppendLine();
+                sb.AppendLine("--- Floats ---");
+                foreach (string prop in floatProps)
+                {
+                    if (mat.HasProperty(prop))
+                    {
+                        float f = mat.GetFloat(prop);
+                        sb.AppendLine($"[Float] {prop} = {f:F6}");
+                    }
+                }
+
+                // 常见纹理属�?                string[] texProps = new string[]
+                {
+                    "_MainTex", "_BumpMap", "_MetallicGlossMap", "_SpecGlossMap",
+                    "_EmissionMap", "_DetailMask", "_DetailAlbedoMap", "_DetailNormalMap",
+                    "_ParallaxMap", "_OcclusionMap", "_BaseMap", "_BaseColorMap",
+                    "_NormalMap", "_MaskMap"
+                };
+                sb.AppendLine();
+                sb.AppendLine("--- Textures ---");
+                foreach (string prop in texProps)
+                {
+                    if (mat.HasProperty(prop))
+                    {
+                        Texture tex = mat.GetTexture(prop);
+                        Vector2 scale = mat.GetTextureScale(prop);
+                        Vector2 offset = mat.GetTextureOffset(prop);
+                        string texName = tex ? tex.name : "(null)";
+                        int w = tex ? tex.width : 0;
+                        int h = tex ? tex.height : 0;
+                        sb.AppendLine($"[Texture] {prop} = {texName} ({w}x{h}) scale:({scale.x:F2},{scale.y:F2}) offset:({offset.x:F2},{offset.y:F2})");
+                    }
+                }
+
+                // 关键�?                sb.AppendLine();
+                sb.AppendLine("--- Shader Keywords ---");
+                foreach (string kw in mat.shaderKeywords)
+                    sb.AppendLine($"  {kw}");
+
+                File.WriteAllText(path, sb.ToString());
+                ExplorerCore.Log($"材质信息已导�? {path}");
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"导出材质信息失败: {ex.Message}");
+            }
+        }
+
+#if !CPP
+        /// <summary>
+        /// 导出动画�?JSON（运行时版本，通过反射尝试获取曲线�?        /// </summary>
+        public static void ExportAnimationAsJSON(AnimationClip clip, string path)
+        {
+            if (!clip)
+            {
+                ExplorerCore.LogWarning("动画为空，无法导出！");
+                return;
+            }
+
+            if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                path += ".json";
+
+            path = EnsureValidPath(path);
+
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("{");
+                sb.AppendLine($"  \"name\": \"{clip.name}\",");
+                sb.AppendLine($"  \"length\": {clip.length:F4},");
+                sb.AppendLine($"  \"frameRate\": {clip.frameRate:F2},");
+                sb.AppendLine($"  \"loopTime\": {clip.isLooping.ToString().ToLower()},");
+                sb.AppendLine($"  \"wrapMode\": \"{clip.wrapMode}\",");
+
+                // 运行时尝试用反射获取曲线绑定
+                bool gotCurves = false;
+                try
+                {
+                    System.Reflection.MethodInfo getBindings = typeof(AnimationClip).GetMethod("GetCurveBindings",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (getBindings != null)
+                    {
+                        object bindings = getBindings.Invoke(clip, null);
+                        System.Collections.IEnumerable bindingList = bindings as System.Collections.IEnumerable;
+                        if (bindingList != null)
+                        {
+                            sb.AppendLine("  \"curves\": [");
+                            bool first = true;
+                            foreach (object binding in bindingList)
+                            {
+                                System.Reflection.PropertyInfo pathProp = binding.GetType().GetProperty("path");
+                                System.Reflection.PropertyInfo propNameProp = binding.GetType().GetProperty("propertyName");
+                                System.Reflection.PropertyInfo typeProp = binding.GetType().GetProperty("type");
+
+                                string curvePath = pathProp?.GetValue(binding, null)?.ToString() ?? "";
+                                string propName = propNameProp?.GetValue(binding, null)?.ToString() ?? "";
+                                string typeName = (typeProp?.GetValue(binding, null) as System.Type)?.Name ?? "Unknown";
+
+                                // 获取曲线
+                                System.Reflection.MethodInfo getCurve = typeof(AnimationClip).GetMethod("GetEditorCurve",
+                                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                                AnimationCurve curve = null;
+                                if (getCurve != null)
+                                    curve = getCurve.Invoke(clip, new object[] { binding }) as AnimationCurve;
+
+                                if (!first)
+                                    sb.AppendLine(",");
+                                first = false;
+
+                                sb.AppendLine("    {");
+                                sb.AppendLine($"      \"path\": \"{curvePath}\",");
+                                sb.AppendLine($"      \"propertyName\": \"{propName}\",");
+                                sb.AppendLine($"      \"type\": \"{typeName}\",");
+
+                                if (curve != null && curve.keys.Length > 0)
+                                {
+                                    sb.AppendLine("      \"keys\": [");
+                                    for (int i = 0; i < curve.keys.Length; i++)
+                                    {
+                                        Keyframe key = curve.keys[i];
+                                        if (i > 0)
+                                            sb.AppendLine(",");
+                                        sb.Append($"        {{\"time\":{key.time:F4},\"value\":{key.value:F4},\"inTangent\":{key.inTangent:F4},\"outTangent\":{key.outTangent:F4}}}");
+                                    }
+                                    sb.AppendLine();
+                                    sb.AppendLine("      ]");
+                                }
+                                else
+                                {
+                                    sb.AppendLine("      \"keys\": []");
+                                }
+                                sb.Append("    }");
+                            }
+                            sb.AppendLine();
+                            sb.AppendLine("  ]");
+                            gotCurves = true;
+                        }
+                    }
+                }
+                catch { }
+
+                if (!gotCurves)
+                {
+                    sb.AppendLine("  \"curves\": [],");
+                    sb.AppendLine("  \"note\": \"运行时无法获取曲线数据，仅导出基本信息。请使用 AssetRipper 等工具获取完整动画数据。\"");
+                }
+
+                sb.AppendLine("}");
+
+                File.WriteAllText(path, sb.ToString());
+                ExplorerCore.Log($"动画已导�? {path}");
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"导出动画失败: {ex.Message}");
+            }
+        }
+#endif
+
+        /// <summary>
+        /// 导出动画基本信息（用于无法直接访�?AnimationClip 的情况）
+        /// </summary>
+        public static void ExportAnimationInfo(object animObj, string path)
+        {
+            if (animObj == null)
+                return;
+
+            if (!path.EndsWith(".json", System.StringComparison.OrdinalIgnoreCase))
+                path += ".json";
+            path = EnsureValidPath(path);
+
+            try
+            {
+                System.Type type = animObj.GetType();
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("{");
+                sb.AppendLine($"  \"type\": \"{type.Name}\",");
+
+                // 尝试获取常见属�?                string[] props = { "name", "length", "frameRate", "isLooping", "wrapMode" };
+                bool first = true;
+                foreach (string propName in props)
+                {
+                    PropertyInfo prop = type.GetProperty(propName, BindingFlags.Public | BindingFlags.Instance);
+                    if (prop != null)
+                    {
+                        object val = prop.GetValue(animObj, null);
+                        if (!first)
+                            sb.AppendLine(",");
+                        first = false;
+                        if (val is string s)
+                            sb.Append($"  \"{propName}\": \"{s}\"");
+                        else
+                            sb.Append($"  \"{propName}\": {val}");
+                    }
+                }
+                sb.AppendLine();
+                sb.AppendLine("}");
+                File.WriteAllText(path, sb.ToString());
+                ExplorerCore.Log($"动画信息已导�? {path}");
+            }
+            catch (System.Exception ex)
+            {
+                ExplorerCore.LogWarning($"导出动画信息失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 获取默认输出目录
+        /// </summary>
+        public static string GetDefaultOutputDir()
+        {
+            try
+            {
+                return ConfigManager.Default_Output_Path.Value;
+            }
+            catch
+            {
+                return Path.Combine(Path.Combine(Application.dataPath, ".."), "UnityExplorer_Exports");
+            }
+        }
+
+        /// <summary>
+        /// 确保路径有效（创建目录等�?        /// </summary>
+        static string EnsureValidPath(string path)
+        {
+            string dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            // 清理文件名中的非法字�?            string fileName = Path.GetFileName(path);
+            foreach (char c in Path.GetInvalidFileNameChars())
+                fileName = fileName.Replace(c, '_');
+
+            return Path.Combine(dir, fileName);
+        }
+    }
+}
+
