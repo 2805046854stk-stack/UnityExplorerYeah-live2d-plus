@@ -1,0 +1,2 @@
+# UnityExplorerYeah-live2d-plus
+该项目fork自sinai-dev/UnityExplorer翻译的中文版魔改而来，增强了对一些新老游戏兼容性，添加对live2d和SPINE提取
