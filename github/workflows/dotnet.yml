@@ -1,0 +1,131 @@
+name: Build UnityExplorer
+
+# Controls when the action will run.
+on:
+  push:
+    branches: [master]
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'pre-release'
+        type: choice
+        options:
+        - pre-release
+        - release
+      release_tag:
+        description: '发布标签（留空以使用自动生成的标签）'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+    if: "!contains(github.event.head_commit.message, '-noci')"
+    permissions:
+      contents: write
+
+    steps:
+      # Setup
+
+      - name: Checkout latest      
+        uses: actions/checkout@v4
+        
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+          include-prerelease: true
+        
+      # Run build script
+      - run: |
+         ./build.ps1        
+          
+      # Upload to Release Page if this is a manually triggered workflow
+      - name: Create Release and Upload Artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || format('v{0}', github.run_number) }}
+          name: UnityExplorer ${{ github.event.inputs.release_tag || format('v{0}', github.run_number) }}
+          body: ${{ github.event.head_commit.message }}
+          draft: false
+          prerelease: ${{ github.event.inputs.release_type == 'pre-release' }}
+          files: |
+            ./Release/UnityExplorer.MelonLoader.IL2CPP.net6preview.zip
+            ./Release/UnityExplorer.MelonLoader.IL2CPP.zip
+            ./Release/UnityExplorer.MelonLoader.Mono.zip
+            ./Release/UnityExplorer.BepInEx.IL2CPP.zip
+            ./Release/UnityExplorer.BepInEx.IL2CPP.CoreCLR.zip
+            ./Release/UnityExplorer.BepInEx5.Mono.zip
+            ./Release/UnityExplorer.BepInEx6.Mono.zip
+            ./Release/UnityExplorer.Standalone.Mono.zip
+            ./Release/UnityExplorer.Standalone.IL2CPP.zip
+            ./Release/UnityExplorer.Editor.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      #  Upload artifacts
+      
+      # BepInEx IL2CPP
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.BepInEx.IL2CPP.zip
+          path: ./Release/UnityExplorer.BepInEx.IL2CPP/
+      
+      # BepInEx IL2CPP CoreCLR
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.BepInEx.IL2CPP.CoreCLR.zip
+          path: ./Release/UnityExplorer.BepInEx.IL2CPP.CoreCLR/
+     
+      # BepInEx 5 Mono
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.BepInEx5.Mono.zip
+          path: ./Release/UnityExplorer.BepInEx5.Mono/
+      
+      # BepInEx 6 Mono
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.BepInEx6.Mono.zip
+          path: ./Release/UnityExplorer.BepInEx6.Mono/
+      
+      # Editor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.Editor.zip
+          path: ./UnityEditorPackage/
+      
+      # MelonLoader IL2CPP net6preview
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.MelonLoader.IL2CPP.net6preview.zip
+          path: ./Release/UnityExplorer.MelonLoader.IL2CPP.net6preview/
+      
+      # MelonLoader IL2CPP net472
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.MelonLoader.IL2CPP.zip
+          path: ./Release/UnityExplorer.MelonLoader.IL2CPP/
+      
+      # MelonLoader Mono
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.MelonLoader.Mono.zip
+          path: ./Release/UnityExplorer.MelonLoader.Mono/
+      
+      # Standalone Il2Cpp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.Standalone.IL2CPP.zip
+          path: ./Release/UnityExplorer.Standalone.IL2CPP/
+      
+      # Standalone Mono
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnityExplorer.Standalone.Mono.zip
+          path: ./Release/UnityExplorer.Standalone.Mono/
+      
